@@ -1,0 +1,12 @@
+{
+  "name": "Три жизни",
+  "short_name": "Три жизни",
+  "description": "Учёба, работа и отношения: баланс времени, дедлайны, сессия и бюджет",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#eef3ee",
+  "theme_color": "#eef3ee",
+  "lang": "ru",
+  "icons": [{ "src": "icons/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }]
+}
