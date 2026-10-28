@@ -75,10 +75,84 @@ function load() {
   try { const raw = localStorage.getItem(KEY); if (raw) return Object.assign(blank(), JSON.parse(raw)); } catch (_) {}
   return blank();
 }
-function save() { try { localStorage.setItem(KEY, JSON.stringify(S)); } catch (_) {} }
+function save(fromCloud) {
+  if (!fromCloud) S._ts = Date.now();
+  try { localStorage.setItem(KEY, JSON.stringify(S)); } catch (_) {}
+  if (!fromCloud) cloudPush();
+}
 const sp = id => S.spheres.find(x => x.id === id) || S.spheres[0];
 const spColor = id => SPHERE_COLORS[id] || sp(id)?.color || '#999';
 const spName = id => (id === 'love' ? S.profile.partner || 'Партнёр' : sp(id)?.name) || '';
+
+// ============ Облако (Supabase, общая база с Duo) ============
+// Внутри Telegram входим по подписи initData, данные храним в lp_state, записи из бота забираем из lp_inbox.
+const SB_URL = 'https://fuisujbwjwbddtfstkbh.supabase.co';
+const SB_KEY = 'sb_publishable_BOWxBrtsNsIaUQJYgqEXbQ_vZm6jwLl';
+const cloud = { sb: null, uid: null, tgId: null, status: 'local', pushT: null, pulling: false };
+const stripUi = st => { const c = JSON.parse(JSON.stringify(st)); delete c.ui; return c; };
+async function cloudInit() {
+  const initData = TG?.initData;
+  if (!initData || !window.supabase) return;
+  cloud.status = 'connecting';
+  try {
+    cloud.sb = window.supabase.createClient(SB_URL, SB_KEY, { auth: { persistSession: false, autoRefreshToken: true } });
+    const r = await fetch(SB_URL + '/functions/v1/lp-auth', { method: 'POST', headers: { 'Content-Type': 'application/json', apikey: SB_KEY }, body: JSON.stringify({ initData }) });
+    const j = await r.json();
+    if (!j.access_token) throw new Error(j.error || 'auth');
+    const { data, error } = await cloud.sb.auth.setSession({ access_token: j.access_token, refresh_token: j.refresh_token });
+    if (error) throw error;
+    cloud.uid = data.user.id; cloud.tgId = tgUser?.id || null;
+    if (!S.profile.name && j.first_name) S.profile.name = j.first_name;
+    cloud.status = 'on';
+    await cloudPull(true);
+  } catch (e) { console.warn('cloud', e); cloud.status = 'error'; }
+}
+async function cloudPull(first) {
+  if (!cloud.uid || cloud.pulling) return;
+  cloud.pulling = true;
+  try {
+    const { data: row } = await cloud.sb.from('lp_state').select('state, updated_at').eq('user_id', cloud.uid).maybeSingle();
+    const remote = row?.state && row.state.v ? row.state : null;
+    const remoteTs = remote?._ts || 0, localTs = S._ts || 0;
+    const takeRemote = remote && (remoteTs > localTs || (!S.onboarded && remote.onboarded));
+    if (takeRemote) {
+      const ui = S.ui; S = Object.assign(blank(), remote); S.ui = Object.assign(blank().ui, ui || {});
+      save(true); render();
+    } else if (first && (localTs > remoteTs || !remote)) {
+      if (S.onboarded || S._ts) await cloudPushNow();
+    }
+    await cloudInbox();
+  } catch (e) { console.warn('pull', e); }
+  cloud.pulling = false;
+}
+async function cloudInbox() {
+  const { data: items } = await cloud.sb.from('lp_inbox').select('*').order('created_at');
+  if (!items?.length) return;
+  let n = 0;
+  for (const it of items) {
+    const p = it.payload || {};
+    if (it.kind === 'tx' && num(p.amount) > 0) { S.budget.tx.push({ id: uid(), type: p.type === 'in' ? 'in' : 'out', amount: num(p.amount), date: p.date || today(), cat: p.cat || 'Другое', note: p.note || '', shared: !!p.shared, paidBy: p.paidBy || 'me' }); n++; }
+    if (it.kind === 'deadline' && p.title && p.due) { const d = { id: uid(), title: p.title, sphere: S.spheres.some(x => x.id === p.sphere) ? p.sphere : 'study', due: p.due, steps: [] }; S.deadlines.push(d); S.ui.open[d.id] = true; n++; }
+  }
+  await cloud.sb.from('lp_inbox').delete().in('id', items.map(i => i.id));
+  if (n) { save(); render(); toast(`Из бота: ${n} ${plural(n, ['запись', 'записи', 'записей'])}`); }
+}
+function cloudPush() {
+  if (!cloud.uid) return;
+  clearTimeout(cloud.pushT);
+  cloud.pushT = setTimeout(cloudPushNow, 700);
+}
+async function cloudPushNow() {
+  if (!cloud.uid) return;
+  clearTimeout(cloud.pushT);
+  try {
+    const { error } = await cloud.sb.from('lp_state').upsert({ user_id: cloud.uid, tg_id: cloud.tgId, state: stripUi(S), updated_at: new Date().toISOString() }, { onConflict: 'user_id' });
+    if (error) throw error;
+    cloud.status = 'on';
+  } catch (e) { console.warn('push', e); cloud.status = 'error'; }
+}
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') cloudPull(); else cloudPushNow(); });
+TG?.onEvent?.('activated', () => cloudPull());
 
 // ============ Тема ============
 function applyTheme() {
@@ -707,7 +781,8 @@ function settings(focus) {
     <div class="f"><label>Обязательные траты в месяц</label><div data-fixed>${incomesHtml(S.budget.fixed, 'fixed')}</div><button type="button" class="link" data-x="fix-add">+ трата</button></div>
     <div class="f"><label>Тема</label><div class="seg" data-name="theme" data-value="${S.theme}"><button type="button" data-v="auto" class="${S.theme === 'auto' ? 'on' : ''}">Авто</button><button type="button" data-v="light" class="${S.theme === 'light' ? 'on' : ''}">Светлая</button><button type="button" data-v="dark" class="${S.theme === 'dark' ? 'on' : ''}">Тёмная</button></div></div>
     <button class="btn acc big" data-x="save">Сохранить</button>
-    <div class="g2" style="margin-top:14px"><button class="btn g" data-x="export">Скачать копию данных</button><button class="btn g" data-x="import">Загрузить копию</button></div>
+    <div class="m s" style="margin:12px 0 0;text-align:center">${cloud.status === 'on' ? 'Данные сохраняются в облаке и доступны с любого устройства через бота' : cloud.status === 'error' ? 'Нет связи с облаком, данные пока сохраняются на этом устройстве' : 'Открой приложение через бота, чтобы данные сохранялись в облаке'}</div>
+    <div class="g2" style="margin-top:10px"><button class="btn g" data-x="export">Скачать копию данных</button><button class="btn g" data-x="import">Загрузить копию</button></div>
     <button class="btn g big" style="margin-top:8px" data-x="onb">Пройти приветствие заново</button>
     <button class="btn danger big" style="margin-top:8px" data-x="reset">Стереть всё</button>
     <input type="file" accept="application/json" class="hidden" data-file>`, sh => {
@@ -738,7 +813,7 @@ function settings(focus) {
       if (x === 'export') { const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([JSON.stringify(S, null, 2)], { type: 'application/json' })); a.download = `tri-zhizni-${today()}.json`; a.click(); return; }
       if (x === 'import') { const f = $('[data-file]', sh); f.onchange = async () => { try { const d = JSON.parse(await f.files[0].text()); if (!d.spheres) throw 0; S = Object.assign(blank(), d); save(); closeSheet(); render(); toast('Данные загружены'); } catch (_) { toast('Это не похоже на копию данных'); } }; f.click(); return; }
       if (x === 'onb') { S.onboarded = false; onbStep = 0; save(); closeSheet(); render(); return; }
-      if (x === 'reset') return confirmSheet('Стереть всё?', 'Удалятся все события, дедлайны, предметы и траты на этом устройстве. Сначала можно скачать копию.', 'Стереть', () => { localStorage.removeItem(KEY); S = blank(); onbStep = 0; render(); });
+      if (x === 'reset') return confirmSheet('Стереть всё?', 'Удалятся все события, дедлайны, предметы и траты на этом устройстве. Сначала можно скачать копию.', 'Стереть', () => { localStorage.removeItem(KEY); S = blank(); onbStep = 0; save(); render(); });
     };
   });
 }
@@ -897,3 +972,4 @@ function demoState() {
 // ============ Старт ============
 if ('serviceWorker' in navigator && location.protocol === 'https:') navigator.serviceWorker.register('sw.js').catch(() => {});
 render();
+cloudInit();
