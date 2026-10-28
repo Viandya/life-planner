@@ -214,7 +214,7 @@ async function onMessage(msg: any) {
   if (!text || text.startsWith('/')) return tg('sendMessage', { chat_id: chat, text: 'Не знаю такой команды. /help подскажет, что я умею.' });
 
   const q = parseQuick(text);
-  if (!q) return tg('sendMessage', { chat_id: chat, text: 'Не поняла Напиши, например, <code>кофе 350</code> или <code>эссе до 6.11</code>.', parse_mode: 'HTML' });
+  if (!q) return tg('sendMessage', { chat_id: chat, text: 'Не поняла. Напиши, например, <code>кофе 350</code> или <code>эссе до 6.11</code>.', parse_mode: 'HTML' });
   const u = await userByTg(from.id);
   if (!u) return tg('sendMessage', { chat_id: chat, text: 'Чтобы записывать, сначала открой приложение один раз', reply_markup: { inline_keyboard: [[openBtn()]] } });
   const payload = { ...q.payload, date: todayIso() };
